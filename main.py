@@ -1,3 +1,4 @@
+import json
 import sys
 import arxiv
 from datetime import datetime
@@ -36,6 +37,7 @@ def getPaperIDList(time_range, category_list):
             if start_year <= paper_year <= end_year:
                 paper_ids.append(result.entry_id.split('/')[-1])
             index += 1
+            break
 
     except arxiv.ArxivError as e:
         LOGGER.error(f"Error fetching papers from arXiv: {e}")
@@ -45,14 +47,49 @@ def getPaperIDList(time_range, category_list):
 def getEncoderModel():
     # Load the encoder model for embedding generation
     from sentence_transformers import SentenceTransformer
-    model = SentenceTransformer('Qwen3-Embedding-0.6B')
+    model = SentenceTransformer('all-MiniLM-L12-v2')
     return model
 
 
 if __name__ == "__main__":
-    paper_id_list = getPaperIDList(time_range = (2023, 2025), category_list= ("cs.AI", "cs.CV") )
-    encoder_model = getEncoderModel()
-    paper_table = dict()
+    from process import encode_papers_batch, compare_vectors, find_similar_papers
+    
+    paper_id_list = []
+    with open(r"paper_arxiv_lists\CVPR2022_paper_ids.json", "r") as f:
+        paper_list = json.load(f)
+    
+    # "http://arxiv.org/abs/2008.11600"
+    for k,v in paper_list.items():
+        if v is not None and "arxiv.org" in v and "cnn" in k.lower():
+            paper_id_list.append(v.split('/')[-1])
+    print(paper_id_list)
 
-    import code
-    code.interact(local=locals())
+    LOGGER.info(f"Found {len(paper_id_list)} papers")
+
+    encoder_model = getEncoderModel()
+
+    LOGGER.info("Encoding papers...")
+    paper_table = encode_papers_batch(paper_id_list, encoder_model)
+    LOGGER.info(f"Encoded {len(paper_table)} papers into vectors")
+    
+    if len(paper_table) >= 2:
+        paper_ids = list(paper_table.keys())
+        similarity = compare_vectors(
+            paper_table[paper_ids[0]], 
+            paper_table[paper_ids[1]], 
+            method="cosine"
+        )
+        LOGGER.info(f"Cosine similarity between first two papers: {similarity:.4f}")
+        
+        # Find similar papers to the first one
+        similar_papers = find_similar_papers(
+            paper_ids[0], 
+            paper_table, 
+            encoder_model, 
+            top_k=5
+        )
+        LOGGER.info(f"Top 5 similar papers to {paper_ids[0]}:")
+        for paper_id, score in similar_papers:
+            LOGGER.info(f"  {paper_id}: {score:.4f}")
+    
+
