@@ -5,56 +5,14 @@ import mimetypes
 import threading
 import time
 import copy
+import random
+from typing import Dict
 
 app = Flask(__name__)
 
-def file_to_data_url(filepath):
-    """Return a data URL (base64) for the given file, or empty string if missing/unsupported."""
-    if not os.path.isfile(filepath):
-        return ''
-    mime, _ = mimetypes.guess_type(filepath)
-    if not mime or not mime.startswith('image/'):
-        return ''
-    try:
-        with open(filepath, 'rb') as fh:
-            data = fh.read()
-        b64 = base64.b64encode(data).decode('ascii')
-        return f'data:{mime};base64,{b64}'
-    except Exception:
-        return ''
+var_name_to_ref: Dict[str, object] = dict()
 
-# compute paths relative to this file
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-JPG_PATH = os.path.join(BASE_DIR, 'test_image.jpg')
-PNG_PATH = os.path.join(BASE_DIR, 'test_image.png')
 
-# these will be empty strings if the files are not present
-_raw_jpg = file_to_data_url(JPG_PATH)
-_raw_png = file_to_data_url(PNG_PATH)
-# use a visible placeholder if missing
-test_jpg_base64 = _raw_jpg if _raw_jpg else '[missing: test_image.jpg]'
-test_png_base64 = _raw_png if _raw_png else '[missing: test_image.png]'
-
-# Sample nested dictionary to display
-SAMPLE_NESTED = {
-    "name": "root",
-    "count": 0,
-    "test_jpg": test_jpg_base64,
-    "test_png": test_png_base64,
-    "sample_png": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVQImWNgYAAAAAMAAWgmWQ0AAAAASUVORK5CYII=",
-    "children": [
-        {"name": "child1", "value": 1},
-        {
-            "name": "child2",
-            "children": [
-                {"name": "grandchild1", "value": "a"},
-                {"name": "grandchild2", "value": "b"}
-            ]
-        },
-        {"name": "child3", "dict": {"a": 10, "b": [1, 2, {"x": "y"}]}}
-    ],
-    "meta": {"created": "2025-11-12", "tags": ["demo", "debug"]}
-}
 
 HTML_TEMPLATE = """
 <!doctype html>
@@ -100,7 +58,7 @@ HTML_TEMPLATE = """
 """
 
 
-def render_nested(obj, key_name=None):
+def render_nested(obj, key=""):
     """Recursively render a Python object (dict/list/scalar) to nested HTML lists.
 
     Special-case: when a string value begins with 'data:image/png;base64,', render an <img>
@@ -171,38 +129,18 @@ def render_nested(obj, key_name=None):
 
 @app.route('/')
 def index():
-    tree_html = render_nested(SAMPLE_NESTED)
+    var_name = request.args.get('key', None)
+    if var_name and var_name in var_name_to_ref:
+        tree_html = render_nested(var_name_to_ref[var_name])
+    else:
+        tree_html = "No variable selected or variable not found."
+        tree_html += "<h2>Available Variables:</h2>"
+        for name in var_name_to_ref.keys():
+            tree_html += f'<div><a href="/?key={name}">{name}</a></div>'
+
     return render_template_string(HTML_TEMPLATE, tree_html=tree_html)
 
-
-@app.route('/api/state')
-def api_state():
-    """Return the current SAMPLE_NESTED as JSON for external monitoring or polling."""
-    # flask.jsonify will convert the nested dict to a JSON response
-    return jsonify(SAMPLE_NESTED)
-
-
-@app.route('/api/update', methods=['POST'])
-def api_update():
-    """Update SAMPLE_NESTED with the provided JSON object (top-level merge).
-
-    Example: POST {"name":"newroot"} will set SAMPLE_NESTED['name'] = 'newroot'.
-    Returns the updated state as JSON.
-    """
-    global SAMPLE_NESTED
-    payload = None
-    try:
-        payload = request.get_json(force=True)
-    except Exception:
-        payload = None
-    if not isinstance(payload, dict):
-        return jsonify({'error': 'expected a JSON object in request body'}), 400
-    # shallow merge top-level keys
-    SAMPLE_NESTED.update(payload)
-    return jsonify(SAMPLE_NESTED)
-
-
-def start_server_in_thread(host='127.0.0.1', port=5000):
+def start_server_in_thread(host='0.0.0.0', port=5000):
     """Start the Flask app in a background daemon thread and return the Thread object.
 
     Notes:
@@ -216,51 +154,85 @@ def start_server_in_thread(host='127.0.0.1', port=5000):
     t.start()
     return t
 
-
-def monitor_variable(var_getter, interval=1.0, on_change=None):
-    """Poll the object returned by var_getter() every `interval` seconds and
-    call on_change(prev, cur) when it changes. Prints the new value by default.
-    """
-    prev = copy.deepcopy(var_getter())
-    while True:
-        time.sleep(interval)
-        try:
-            cur = var_getter()
-        except Exception as e:
-            print('monitor_variable: getter error', e)
-            continue
-        if cur != prev:
-            print('Detected change in monitored variable:')
-            try:
-                print(cur)
-            except Exception:
-                # fall back to repr if printing fails
-                print(repr(cur))
-            if on_change:
-                try:
-                    on_change(prev, cur)
-                except Exception as e:
-                    print('monitor_variable: on_change callback error', e)
-            prev = copy.deepcopy(cur)
-
+def register_variable(name: str, ref: object, service_url: str = "0.0.0.0:5000"):
+    """Register a variable by name for inspection in the web UI."""
+    var_name_to_ref[name] = ref
+    print(f"Registered variable '{name}' for inspection at {service_url}/?key={name}")
 
 if __name__ == '__main__':
-    # Start the Flask server in a background thread and monitor SAMPLE_NESTED.
-    server_thread = start_server_in_thread(host='127.0.0.1', port=5000)
+    # Start the Flask server in a background thread
+    port_use = 5000
+    server_thread: threading.Thread = None
+    while port_use < 10000:
+        try:
+            server_thread = start_server_in_thread(host='0.0.0.0', port=port_use)
+            break
+        except OSError as e:
+            print(f"Unable to start server on port {port_use}, trying another: {e}")
+            port_use += random.randint(1, 100)
+            time.sleep(0.5)
 
-    monitor_thread = threading.Thread(
-        target=monitor_variable,
-        args=(lambda: SAMPLE_NESTED, 1.0),
-        daemon=True,
-        name='sample-monitor-thread'
-    )
-    monitor_thread.start()
+    service_url = f'http://0.0.0.0:{port_use}'
+    # monitor_thread = start_monitor_in_thread(
+    #     var_getter=lambda: SAMPLE_NESTED,
+    #     interval=2.0,
+    #     on_change=lambda prev, cur: print('SAMPLE_NESTED changed!', prev, '->', cur)
+    # )
 
-    print('Flask server started in background on http://127.0.0.1:5000')
-    print('API endpoint available at http://127.0.0.1:5000/api/state')
-    print('Monitoring SAMPLE_NESTED variable (prints to console on change).')
+    print('Flask server started in background on http://0.0.0.0:{used_port}')
 
-    # Keep the main thread alive so background threads keep running. Use KeyboardInterrupt to exit.
+
+    # ================== TEST SAMPLE DATA ==================
+    def file_to_data_url(filepath):
+        """Return a data URL (base64) for the given file, or empty string if missing/unsupported."""
+        if not os.path.isfile(filepath):
+            return ''
+        mime, _ = mimetypes.guess_type(filepath)
+        if not mime or not mime.startswith('image/'):
+            return ''
+        try:
+            with open(filepath, 'rb') as fh:
+                data = fh.read()
+            b64 = base64.b64encode(data).decode('ascii')
+            return f'data:{mime};base64,{b64}'
+        except Exception:
+            return ''
+
+    # compute paths relative to this file
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    JPG_PATH = os.path.join(BASE_DIR, 'test_image.jpg')
+    PNG_PATH = os.path.join(BASE_DIR, 'test_image.png')
+
+    # these will be empty strings if the files are not present
+    _raw_jpg = file_to_data_url(JPG_PATH)
+    _raw_png = file_to_data_url(PNG_PATH)
+    # use a visible placeholder if missing
+    test_jpg_base64 = _raw_jpg if _raw_jpg else '[missing: test_image.jpg]'
+    test_png_base64 = _raw_png if _raw_png else '[missing: test_image.png]'
+
+    # Sample nested dictionary to display
+    SAMPLE_NESTED = {
+        "name": "root",
+        "count": 0,
+        "test_jpg": test_jpg_base64,
+        "test_png": test_png_base64,
+        "sample_png": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVQImWNgYAAAAAMAAWgmWQ0AAAAASUVORK5CYII=",
+        "children": [
+            {"name": "child1", "value": 1},
+            {
+                "name": "child2",
+                "children": [
+                    {"name": "grandchild1", "value": "a"},
+                    {"name": "grandchild2", "value": "b"}
+                ]
+            },
+            {"name": "child3", "dict": {"a": 10, "b": [1, 2, {"x": "y"}]}}
+        ],
+        "meta": {"created": "2025-11-12", "tags": ["demo", "debug"]}
+    }
+
+    register_variable('SAMPLE_NESTED', SAMPLE_NESTED, service_url=service_url)
+
     try:
         while True:
             time.sleep(1)
