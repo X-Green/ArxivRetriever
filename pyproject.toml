@@ -6,6 +6,7 @@ requires-python = ">=3.13"
 dependencies = [
     "arxiv>=2.2.0",
     "bs4>=0.0.2",
+    "flask>=3.1.2",
     "requests>=2.31.0",
     "sentence-transformers>=5.1.2",
 ]
